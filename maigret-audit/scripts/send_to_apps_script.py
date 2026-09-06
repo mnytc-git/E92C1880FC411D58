@@ -26,7 +26,6 @@ ALLOWED_MIME_TYPES = {
 MAX_FILE_SIZE = 4 * 1024 * 1024
 MAX_TOTAL_SIZE = 10 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 120
-MAX_RESPONSE_PREVIEW = 500
 
 
 def validate_job_id(job_id: str) -> None:
@@ -48,8 +47,7 @@ def validate_job_id(job_id: str) -> None:
         )
 
     if any(
-        character.lower()
-        not in allowed_characters
+        character.lower() not in allowed_characters
         for character in job_id
     ):
         raise ValueError(
@@ -57,23 +55,17 @@ def validate_job_id(job_id: str) -> None:
         )
 
 
-def validate_endpoint(
-    endpoint: str,
-) -> None:
+def validate_endpoint(endpoint: str) -> None:
     """Memvalidasi URL Apps Script."""
 
     if not endpoint:
         raise ValueError(
-            "APPS_SCRIPT_WEBHOOK_URL "
-            "belum tersedia."
+            "APPS_SCRIPT_WEBHOOK_URL belum tersedia."
         )
 
-    if not endpoint.startswith(
-        "https://"
-    ):
+    if not endpoint.startswith("https://"):
         raise ValueError(
-            "Endpoint Apps Script harus "
-            "menggunakan HTTPS."
+            "Endpoint Apps Script harus menggunakan HTTPS."
         )
 
     if "/exec" not in endpoint:
@@ -83,10 +75,8 @@ def validate_endpoint(
         )
 
 
-def validate_file_name(
-    file_name: str,
-) -> None:
-    """Mencegah nama file yang tidak aman."""
+def validate_file_name(file_name: str) -> None:
+    """Mencegah penggunaan nama file yang tidak aman."""
 
     if not file_name:
         raise ValueError(
@@ -98,10 +88,7 @@ def validate_file_name(
             "Nama file tidak valid."
         )
 
-    if (
-        "/" in file_name
-        or "\\" in file_name
-    ):
+    if "/" in file_name or "\\" in file_name:
         raise ValueError(
             "Nama file mengandung pemisah path: "
             f"{file_name}"
@@ -113,9 +100,7 @@ def validate_file_name(
         )
 
 
-def calculate_sha256(
-    raw_content: bytes,
-) -> str:
+def calculate_sha256(raw_content: bytes) -> str:
     """Menghasilkan checksum SHA-256."""
 
     return hashlib.sha256(
@@ -123,17 +108,14 @@ def calculate_sha256(
     ).hexdigest()
 
 
-def encode_file(
-    path: Path,
-) -> dict[str, Any]:
-    """Mengubah satu file menjadi Base64."""
+def encode_file(path: Path) -> dict[str, Any]:
+    """Mengubah satu file laporan menjadi Base64."""
 
     validate_file_name(
         path.name
     )
 
     extension = path.suffix.lower()
-
     mime_type = ALLOWED_MIME_TYPES.get(
         extension
     )
@@ -179,10 +161,10 @@ def encode_file(
         "content": encoded_content,
     }
 
+
 def collect_files(
     report_folder: Path,
-) -> list[Path]:
-    """
+) -> list"""
     Mengambil laporan TXT, JSON, CSV,
     dan HTML dari folder hasil.
     """
@@ -273,14 +255,12 @@ def create_payload(
 def parse_response(
     response: requests.Response,
 ) -> dict[str, Any]:
-    """Memvalidasi respons JSON Apps Script."""
+    """Memvalidasi respons JSON dari Apps Script."""
 
     try:
         result = response.json()
     except requests.exceptions.JSONDecodeError as error:
-        preview = response.text[
-            :MAX_RESPONSE_PREVIEW
-        ]
+        preview = response.text[:500]
 
         raise RuntimeError(
             "Apps Script tidak mengembalikan JSON. "
@@ -288,13 +268,9 @@ def parse_response(
             f"Respons awal: {preview}"
         ) from error
 
-    if not isinstance(
-        result,
-        dict,
-    ):
+    if not isinstance(result, dict):
         raise RuntimeError(
-            "Format respons Apps Script "
-            "tidak valid."
+            "Format respons Apps Script tidak valid."
         )
 
     return result
@@ -304,7 +280,7 @@ def send_payload(
     endpoint: str,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """Mengirim payload ke Apps Script."""
+    """Mengirim payload laporan ke Apps Script."""
 
     serialized_payload = json.dumps(
         payload,
@@ -333,34 +309,25 @@ def send_payload(
 
     except requests.exceptions.Timeout as error:
         raise RuntimeError(
-            "Permintaan ke Apps Script "
-            "mengalami timeout."
+            "Permintaan ke Apps Script mengalami timeout."
         ) from error
 
     except requests.exceptions.ConnectionError as error:
         raise RuntimeError(
-            "GitHub Actions tidak dapat "
-            "terhubung ke Apps Script."
+            "GitHub Actions tidak dapat terhubung "
+            "ke Apps Script."
         ) from error
 
     except requests.exceptions.HTTPError as error:
         if error.response is not None:
-            status_code = (
-                error.response.status_code
-            )
-
-            response_preview = (
-                error.response.text[
-                    :MAX_RESPONSE_PREVIEW
-                ]
-            )
+            status_code = error.response.status_code
+            response_preview = error.response.text[:500]
         else:
             status_code = "tidak diketahui"
             response_preview = ""
 
         raise RuntimeError(
-            "Apps Script mengembalikan "
-            "kesalahan HTTP. "
+            "Apps Script mengembalikan kesalahan HTTP. "
             f"Kode: {status_code}. "
             f"Respons: {response_preview}"
         ) from error
@@ -390,9 +357,7 @@ def send_payload(
     return result
 
 
-def get_required_environment(
-    name: str,
-) -> str:
+def get_required_environment(name: str) -> str:
     """Membaca environment variable wajib."""
 
     value = os.environ.get(
@@ -412,7 +377,7 @@ def get_required_environment(
 def print_file_summary(
     report_files: list[Path],
 ) -> None:
-    """Menampilkan daftar file ke log."""
+    """Menampilkan ringkasan file ke log."""
 
     print(
         "File laporan yang akan dikirim:"
@@ -421,20 +386,15 @@ def print_file_summary(
     total_size = 0
 
     for path in report_files:
-        file_size = (
-            path.stat().st_size
-        )
-
+        file_size = path.stat().st_size
         total_size += file_size
 
         print(
-            f"- {path.name}: "
-            f"{file_size} byte"
+            f"- {path.name}: {file_size} byte"
         )
 
     print(
-        "Total ukuran asli: "
-        f"{total_size} byte"
+        f"Total ukuran asli: {total_size} byte"
     )
 
 
@@ -447,7 +407,7 @@ def main() -> None:
             "python "
             "maigret-audit/scripts/"
             "send_to_apps_script.py "
-            "reports/<job-id>"
+            "reports/JOB_ID"
         )
 
     report_folder = Path(
@@ -470,10 +430,8 @@ def main() -> None:
         "APPS_SCRIPT_WEBHOOK_URL"
     )
 
-    callback_secret = (
-        get_required_environment(
-            "CALLBACK_SECRET"
-        )
+    callback_secret = get_required_environment(
+        "CALLBACK_SECRET"
     )
 
     job_id = get_required_environment(
