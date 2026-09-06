@@ -1,9 +1,33 @@
+"""
+Mengirim laporan Maigret dari GitHub Actions ke Google Apps Script.
+
+Alur:
+1. Membaca folder laporan yang dihasilkan Maigret.
+2. Memilih file TXT, JSON, CSV, dan HTML.
+3. Memvalidasi nama, ukuran, dan ekstensi file.
+4. Mengubah setiap file menjadi Base64.
+5. Menghitung checksum SHA-256.
+6. Mengirim payload JSON ke Apps Script Web App.
+7. Memastikan Apps Script mengembalikan respons sukses.
+
+Environment variables wajib:
+- APPS_SCRIPT_WEBHOOK_URL
+- CALLBACK_SECRET
+- JOB_ID
+
+Penggunaan:
+python scripts/send_to_apps_script.py reports/<job-id>
+"""
+
+from __future__ import annotations
+
 import base64
 import hashlib
 import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import requests
 
@@ -17,19 +41,112 @@ ALLOWED_MIME_TYPES = {
 
 MAX_FILE_SIZE = 4 * 1024 * 1024
 MAX_TOTAL_SIZE = 10 * 1024 * 1024
+REQUEST_TIMEOUT_SECONDS = 120
+MAX_RESPONSE_PREVIEW = 500
 
 
 def validate_job_id(job_id: str) -> None:
-    allowed = set("abcdef0123456789-")
+    """
+    Memastikan job ID sesuai dengan format UUID yang dibuat Apps Script.
+    """
+
+    allowed_characters = set(
+        "abcdef0123456789-"
+    )
+
+    if not job_id:
+        raise ValueError(
+            "JOB_ID belum tersedia."
+        )
 
     if not 20 <= len(job_id) <= 50:
-        raise ValueError("Panjang job ID tidak valid.")
+        raise ValueError(
+            "Panjang JOB_ID harus antara 20 sampai 50 karakter."
+        )
 
-    if any(character.lower() not in allowed for character in job_id):
-        raise ValueError("Format job ID tidak valid.")
+    if any(
+        character.lower() not in allowed_characters
+        for character in job_id
+    ):
+        raise ValueError(
+            "Format JOB_ID tidak valid."
+        )
 
 
-def encode_file(path: Path) -> dict:
+def validate_endpoint(endpoint: str) -> None:
+    """
+    Memastikan endpoint merupakan URL HTTPS Apps Script.
+    """
+
+    if not endpoint:
+        raise ValueError(
+            "APPS_SCRIPT_WEBHOOK_URL belum tersedia."
+        )
+
+    if not endpoint.startswith("https://"):
+        raise ValueError(
+            "Endpoint Apps Script harus menggunakan HTTPS."
+        )
+
+    if "/exec" not in endpoint:
+        raise ValueError(
+            "Gunakan URL deployment Apps Script yang berakhir dengan /exec."
+        )
+
+
+def validate_file_name(file_name: str) -> None:
+    """
+    Memastikan nama file tidak mengandung pola path traversal.
+    """
+
+    if not file_name:
+        raise ValueError(
+            "Nama file tidak boleh kosong."
+        )
+
+    if file_name in {".", ".."}:
+        raise ValueError(
+            "Nama file tidak valid."
+        )
+
+    if "/" in file_name or "\\" in file_name:
+        raise ValueError(
+            f"Nama file mengandung pemisah path: {file_name}"
+        )
+
+    if Path(file_name).name != file_name:
+        raise ValueError(
+            f"Nama file tidak aman: {file_name}"
+        )
+
+
+def calculate_sha256(raw_content: bytes) -> str:
+    """
+    Menghasilkan checksum SHA-256 dalam bentuk heksadesimal.
+    """
+
+    return hashlib.sha256(
+        raw_content
+    ).hexdigest()
+
+
+def encode_file(path: Path) -> dict[str, Any]:
+    """
+    Membaca dan mengubah satu file laporan menjadi objek payload.
+    """
+
+    validate_file_name(path.name)
+
+    extension = path.suffix.lower()
+    mime_type = ALLOWED_MIME_TYPES.get(
+        extension
+    )
+
+    if not mime_type:
+        raise ValueError(
+            f"Ekstensi tidak diperbolehkan: {path.name}"
+        )
+
     raw_content = path.read_bytes()
 
     if not raw_content:
@@ -37,20 +154,17 @@ def encode_file(path: Path) -> dict:
             f"File kosong tidak dikirim: {path.name}"
         )
 
-    if len(raw_content) > MAX_FILE_SIZE:
+    file_size = len(raw_content)
+
+    if file_size > MAX_FILE_SIZE:
         raise ValueError(
-            f"File melebihi batas 4 MB: {path.name}"
+            "File melebihi batas 4 MB: "
+            f"{path.name} memiliki ukuran {file_size} byte."
         )
 
-    extension = path.suffix.lower()
-    mime_type = ALLOWED_MIME_TYPES.get(extension)
-
-    if not mime_type:
-        raise ValueError(
-            f"Ekstensi tidak diperbolehkan: {path.name}"
-        )
-
-    checksum = hashlib.sha256(raw_content).hexdigest()
+    checksum = calculate_sha256(
+        raw_content
+    )
 
     encoded_content = base64.b64encode(
         raw_content
@@ -60,24 +174,49 @@ def encode_file(path: Path) -> dict:
         "name": path.name,
         "mimeType": mime_type,
         "encoding": "base64",
-        "size": len(raw_content),
+        "size": file_size,
         "sha256": checksum,
         "content": encoded_content,
     }
 
 
-def collect_files(report_folder: Path) -> listselected_files = []
+def collect_files(
+    report_folder: Path,
+) -> list"""
+    Mengambil seluruh laporan dengan ekstensi yang diperbolehkan.
+    """
 
-    for path in sorted(report_folder.iterdir()):
+    selected_files: list[Path] = []
+
+    for path in sorted(
+        report_folder.iterdir(),
+        key=lambda item: item.name.lower(),
+    ):
         if not path.is_file():
             continue
 
-        if path.suffix.lower() in ALLOWED_MIME_TYPES:
-            selected_files.append(path)
+        if path.is_symlink():
+            print(
+                f"Melewati symbolic link: {path.name}",
+                file=sys.stderr,
+            )
+            continue
+
+        extension = path.suffix.lower()
+
+        if extension not in ALLOWED_MIME_TYPES:
+            print(
+                f"Melewati file yang tidak didukung: {path.name}",
+                file=sys.stderr,
+            )
+            continue
+
+        selected_files.append(path)
 
     if not selected_files:
         raise RuntimeError(
-            "Tidak ada laporan TXT, JSON, CSV, atau HTML."
+            "Tidak ada laporan TXT, JSON, CSV, atau HTML "
+            "dalam folder laporan."
         )
 
     total_size = sum(
@@ -87,62 +226,224 @@ def collect_files(report_folder: Path) -> listselected_files = []
 
     if total_size > MAX_TOTAL_SIZE:
         raise RuntimeError(
-            "Total ukuran laporan melebihi 10 MB."
+            "Total ukuran laporan melebihi batas 10 MB. "
+            f"Ukuran aktual: {total_size} byte."
         )
 
     return selected_files
 
 
-def send_payload(
-    endpoint: str,
-    payload: dict,
-) -> dict:
-    response = requests.post(
-        endpoint,
-        headers={
-            "Content-Type": "text/plain;charset=utf-8",
-            "User-Agent": "Maigret-GitHub-Actions/1.0",
-        },
-        data=json.dumps(
-            payload,
-            ensure_ascii=False,
-        ).encode("utf-8"),
-        timeout=120,
-        allow_redirects=True,
-    )
+def create_payload(
+    job_id: str,
+    callback_secret: str,
+    report_files: list[Path],
+) -> dict[str, Any]:
+    """
+    Membentuk payload yang akan diterima fungsi doPost Apps Script.
+    """
 
-    response.raise_for_status()
+    encoded_files = [
+        encode_file(path)
+        for path in report_files
+    ]
+
+    return {
+        "action": "upload",
+        "jobId": job_id,
+        "callbackSecret": callback_secret,
+        "githubRunId": os.environ.get(
+            "GITHUB_RUN_ID",
+            "",
+        ),
+        "githubRunAttempt": os.environ.get(
+            "GITHUB_RUN_ATTEMPT",
+            "",
+        ),
+        "repository": os.environ.get(
+            "GITHUB_REPOSITORY",
+            "",
+        ),
+        "files": encoded_files,
+    }
+
+
+def parse_response(
+    response: requests.Response,
+) -> dict[str, Any]:
+    """
+    Memvalidasi bahwa respons Apps Script berupa JSON.
+    """
 
     try:
         result = response.json()
-    except requests.JSONDecodeError as error:
-        preview = response.text[:500]
+    except requests.exceptions.JSONDecodeError as error:
+        preview = response.text[
+            :MAX_RESPONSE_PREVIEW
+        ]
 
         raise RuntimeError(
             "Apps Script tidak mengembalikan JSON. "
+            f"Kode HTTP: {response.status_code}. "
             f"Respons awal: {preview}"
         ) from error
 
-    if not result.get("ok"):
+    if not isinstance(result, dict):
         raise RuntimeError(
+            "Format respons Apps Script tidak valid."
+        )
+
+    return result
+
+
+def send_payload(
+    endpoint: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Mengirim laporan ke Apps Script Web App.
+    """
+
+    serialized_payload = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    try:
+        response = requests.post(
+            endpoint,
+            headers={
+                "Content-Type": (
+                    "text/plain;charset=utf-8"
+                ),
+                "Accept": "application/json",
+                "User-Agent": (
+                    "Maigret-GitHub-Actions/1.0"
+                ),
+            },
+            data=serialized_payload,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+            allow_redirects=True,
+        )
+
+        response.raise_for_status()
+
+    except requests.exceptions.Timeout as error:
+        raise RuntimeError(
+            "Permintaan ke Apps Script mengalami timeout."
+        ) from error
+
+    except requests.exceptions.ConnectionError as error:
+        raise RuntimeError(
+            "GitHub Actions tidak dapat terhubung "
+            "ke Apps Script."
+        ) from error
+
+    except requests.exceptions.HTTPError as error:
+        response_preview = (
+            error.response.text[
+                :MAX_RESPONSE_PREVIEW
+            ]
+            if error.response is not None
+            else ""
+        )
+
+        status_code = (
+            error.response.status_code
+            if error.response is not None
+            else "tidak diketahui"
+        )
+
+        raise RuntimeError(
+            "Apps Script mengembalikan kesalahan HTTP. "
+            f"Kode: {status_code}. "
+            f"Respons: {response_preview}"
+        ) from error
+
+    except requests.exceptions.RequestException as error:
+        raise RuntimeError(
+            "Pengiriman laporan ke Apps Script gagal: "
+            f"{error}"
+        ) from error
+
+    result = parse_response(
+        response
+    )
+
+    if not result.get("ok"):
+        error_message = str(
             result.get(
                 "error",
                 "Apps Script menolak unggahan.",
             )
         )
 
+        raise RuntimeError(
+            error_message
+        )
+
     return result
 
 
+def get_required_environment(
+    name: str,
+) -> str:
+    """
+    Membaca environment variable wajib.
+    """
+
+    value = os.environ.get(
+        name,
+        "",
+    ).strip()
+
+    if not value:
+        raise RuntimeError(
+            f"Environment variable {name} belum tersedia."
+        )
+
+    return value
+
+
+def print_file_summary(
+    report_files: list[Path],
+) -> None:
+    """
+    Menampilkan daftar file tanpa menampilkan isi laporan.
+    """
+
+    print("File laporan yang akan dikirim:")
+
+    total_size = 0
+
+    for path in report_files:
+        file_size = path.stat().st_size
+        total_size += file_size
+
+        print(
+            f"- {path.name}: {file_size} byte"
+        )
+
+    print(
+        f"Total ukuran asli: {total_size} byte"
+    )
+
+
 def main() -> None:
+    """
+    Titik masuk utama program.
+    """
+
     if len(sys.argv) != 2:
         raise SystemExit(
-            "Penggunaan: python "
-            "scripts/send_to_apps_script.py "
+            "Penggunaan:\n"
+            "python scripts/send_to_apps_script.py "
             "<folder-laporan>"
         )
 
-    report_folder = Path(sys.argv[1]).resolve()
+    report_folder = Path(
+        sys.argv[1]
+    ).resolve()
 
     if not report_folder.exists():
         raise FileNotFoundError(
@@ -154,58 +455,79 @@ def main() -> None:
             f"Path bukan folder: {report_folder}"
         )
 
-    endpoint = os.environ.get(
-        "APPS_SCRIPT_WEBHOOK_URL",
-        "",
-    ).strip()
+    endpoint = get_required_environment(
+        "APPS_SCRIPT_WEBHOOK_URL"
+    )
 
-    callback_secret = os.environ.get(
-        "CALLBACK_SECRET",
-        "",
-    ).strip()
+    callback_secret = get_required_environment(
+        "CALLBACK_SECRET"
+    )
 
-    job_id = os.environ.get(
-        "JOB_ID",
-        "",
-    ).strip()
+    job_id = get_required_environment(
+        "JOB_ID"
+    )
 
-    if not endpoint:
-        raise RuntimeError(
-            "APPS_SCRIPT_WEBHOOK_URL belum tersedia."
-        )
+    validate_endpoint(
+        endpoint
+    )
 
-    if not endpoint.startswith("https://"):
-        raise RuntimeError(
-            "Endpoint Apps Script harus menggunakan HTTPS."
-        )
+    validate_job_id(
+        job_id
+    )
 
-    if not callback_secret:
-        raise RuntimeError(
-            "CALLBACK_SECRET belum tersedia."
-        )
+    report_files = collect_files(
+        report_folder
+    )
 
-    validate_job_id(job_id)
+    print(
+        f"JOB_ID: {job_id}"
+    )
 
-    report_files = collect_files(report_folder)
+    print_file_summary(
+        report_files
+    )
 
-    payload = {
-        "action": "upload",
-        "jobId": job_id,
-        "callbackSecret": callback_secret,
-        "files": [
-            encode_file(path)
-            for path in report_files
-        ],
-    }
+    payload = create_payload(
+        job_id=job_id,
+        callback_secret=callback_secret,
+        report_files=report_files,
+    )
+
+    print(
+        "Mengirim laporan ke Apps Script..."
+    )
 
     result = send_payload(
-        endpoint,
-        payload,
+        endpoint=endpoint,
+        payload=payload,
     )
 
     safe_result = {
         "ok": result.get("ok"),
         "jobId": result.get("jobId"),
         "status": result.get("status"),
-        "files": result.get("files", []),
-  
+        "files": result.get(
+            "files",
+            [],
+        ),
+        "duplicate": result.get(
+            "duplicate",
+            False,
+        ),
+    }
+
+    print(
+        "Apps Script menerima laporan."
+    )
+
+    print(
+        json.dumps(
+            safe_result,
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()
