@@ -179,10 +179,10 @@ def encode_file(
         "content": encoded_content,
     }
 
-
 def collect_files(
     report_folder: Path,
-) -> list"""
+) -> list[Path]:
+    """
     Mengambil laporan TXT, JSON, CSV,
     dan HTML dari folder hasil.
     """
