@@ -1,1 +1,196 @@
 
+name: Audit Username Maigret
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "ID pekerjaan"
+        required: true
+        type: string
+
+      username:
+        description: "Username yang diaudit"
+        required: true
+        type: string
+
+      scope:
+        description: "Jumlah situs"
+        required: true
+        default: "100"
+        type: string
+
+      category:
+        description: "Kategori situs"
+        required: true
+        default: "social"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maigret-${{ inputs.job_id }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      JOB_ID: ${{ inputs.job_id }}
+      USERNAME_INPUT: ${{ inputs.username }}
+      SCOPE_INPUT: ${{ inputs.scope }}
+      CATEGORY_INPUT: ${{ inputs.category }}
+
+    steps:
+      - name: Ambil repositori
+        uses: actions/checkout@v4
+
+      - name: Siapkan Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instal dependensi
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validasi masukan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s' "$JOB_ID" |
+            grep -Eq '^[a-f0-9-]{20,50}$'; then
+            echo "ID pekerjaan tidak valid."
+            exit 1
+          fi
+
+          if ! printf '%s' "$USERNAME_INPUT" |
+            grep -Eq '^[A-Za-z0-9._-]{2,50}$'; then
+            echo "Username tidak valid."
+            exit 1
+          fi
+
+          case "$SCOPE_INPUT" in
+            50|100|250|500)
+              ;;
+            *)
+              echo "Cakupan tidak valid."
+              exit 1
+              ;;
+          esac
+
+          case "$CATEGORY_INPUT" in
+            social|coding|business|gaming|photo|global)
+              ;;
+            *)
+              echo "Kategori tidak valid."
+              exit 1
+              ;;
+          esac
+
+      - name: Jalankan Maigret
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "reports/$JOB_ID"
+
+          if [ "$CATEGORY_INPUT" = "global" ]; then
+            maigret "$USERNAME_INPUT" \
+              --top-sites "$SCOPE_INPUT" \
+              --timeout 15 \
+              --max-connections 10 \
+              --html \
+              --json \
+              --csv \
+              --txt \
+              --folderoutput "reports/$JOB_ID"
+          else
+            maigret "$USERNAME_INPUT" \
+              --top-sites "$SCOPE_INPUT" \
+              --tags "$CATEGORY_INPUT" \
+              --timeout 15 \
+              --max-connections 10 \
+              --html \
+              --json \
+              --csv \
+              --txt \
+              --folderoutput "reports/$JOB_ID"
+          fi
+
+      - name: Buat metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          job_id = os.environ["JOB_ID"]
+          folder = Path("reports") / job_id
+
+          metadata = {
+              "jobId": job_id,
+              "username": os.environ["USERNAME_INPUT"],
+              "scope": int(os.environ["SCOPE_INPUT"]),
+              "category": os.environ["CATEGORY_INPUT"],
+              "status": "completed",
+              "createdAt": datetime.now(timezone.utc).isoformat(),
+              "repository": os.environ.get("GITHUB_REPOSITORY"),
+              "runId": os.environ.get("GITHUB_RUN_ID"),
+              "warning": (
+                  "Kecocokan username tidak membuktikan bahwa "
+                  "akun-akun tersebut dimiliki orang yang sama."
+              ),
+          }
+
+          (folder / "metadata.json").write_text(
+              json.dumps(metadata, indent=2, ensure_ascii=False),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Buat checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find "reports/$JOB_ID" \
+            -type f \
+            ! -name SHA256SUMS.txt \
+            -print0 |
+            sort -z |
+            xargs -0 sha256sum \
+            > "reports/$JOB_ID/SHA256SUMS.txt"
+
+      - name: Unggah ke Google Drive
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: >-
+            ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_DRIVE_FOLDER_ID: >-
+            ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          APPS_SCRIPT_CALLBACK_URL: >-
+            ${{ secrets.APPS_SCRIPT_CALLBACK_URL }}
+          CALLBACK_SECRET: >-
+            ${{ secrets.CALLBACK_SECRET }}
+        run: |
+          python scripts/upload_to_drive.py \
+            "reports/$JOB_ID"
+
+      - name: Simpan artefak cadangan
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maigret-${{ inputs.job_id }}
+          path: reports/${{ inputs.job_id }}/
+          retention-days: 7
+          if-no-files-found: warn
