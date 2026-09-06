@@ -148,8 +148,13 @@ jobs:
           COMMAND=(
             maigret
             "$USERNAME_INPUT"
-            --timeout 20
+            --no-recursion
+            --timeout 30
+            --retries 2
             --max-connections 20
+            --cloudflare-bypass
+            --print-errors
+            --force-update
             --html
             --json simple
             --csv
