@@ -171,18 +171,14 @@ jobs:
             xargs -0 sha256sum \
             > "reports/$JOB_ID/SHA256SUMS.txt"
 
-      - name: Unggah ke Google Drive
+      - name: Kirim laporan ke Apps Script
         env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: >-
-            ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          GOOGLE_DRIVE_FOLDER_ID: >-
-            ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
-          APPS_SCRIPT_CALLBACK_URL: >-
-            ${{ secrets.APPS_SCRIPT_CALLBACK_URL }}
+          APPS_SCRIPT_WEBHOOK_URL: >-
+            ${{ secrets.APPS_SCRIPT_WEBHOOK_URL }}
           CALLBACK_SECRET: >-
             ${{ secrets.CALLBACK_SECRET }}
         run: |
-          python scripts/upload_to_drive.py \
+          python maigret-audit/scripts/send_to_apps_script.py \
             "reports/$JOB_ID"
 
       - name: Simpan artefak cadangan
