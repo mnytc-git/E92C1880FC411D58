@@ -106,7 +106,7 @@ jobs:
               --timeout 15 \
               --max-connections 10 \
               --html \
-              --json \
+              --json simple \
               --csv \
               --txt \
               --folderoutput "reports/$JOB_ID"
@@ -117,7 +117,7 @@ jobs:
               --timeout 15 \
               --max-connections 10 \
               --html \
-              --json \
+              --json simple \
               --csv \
               --txt \
               --folderoutput "reports/$JOB_ID"
