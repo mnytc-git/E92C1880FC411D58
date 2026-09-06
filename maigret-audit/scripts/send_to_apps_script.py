@@ -1,6 +1,18 @@
 """
-Mengirim laporan Maigret dari GitHub Actions
-ke Google Apps Script Web App.
+Mengirim laporan utama Maigret dari GitHub Actions
+ke endpoint penyimpanan laporan.
+
+File yang dikirim:
+- report_*.txt
+- report_*.csv
+- report_*_simple.json
+- report_*_plain.html
+- metadata.json
+
+File internal yang tidak dikirim sebagai laporan utama:
+- SHA256SUMS.txt
+- symbolic link
+- file lain yang tidak didukung
 """
 
 import base64
@@ -20,13 +32,17 @@ ALLOWED_MIME_TYPES = {
     ".html": "text/html",
 }
 
+EXCLUDED_FILE_NAMES = {
+    "sha256sums.txt",
+}
+
 MAX_FILE_SIZE = 4 * 1024 * 1024
 MAX_TOTAL_SIZE = 10 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 120
 
 
 def validate_job_id(job_id):
-    """Memvalidasi format job ID."""
+    """Memvalidasi format ID pekerjaan."""
 
     allowed_characters = set(
         "abcdef0123456789-"
@@ -54,7 +70,7 @@ def validate_job_id(job_id):
 
 
 def validate_endpoint(endpoint):
-    """Memvalidasi URL Apps Script."""
+    """Memvalidasi endpoint penerima laporan."""
 
     if not endpoint:
         raise ValueError(
@@ -66,19 +82,18 @@ def validate_endpoint(endpoint):
         "https://"
     ):
         raise ValueError(
-            "Endpoint Apps Script harus "
-            "menggunakan HTTPS."
+            "Endpoint harus menggunakan HTTPS."
         )
 
     if "/exec" not in endpoint:
         raise ValueError(
             "Gunakan URL deployment "
-            "Apps Script yang berakhir /exec."
+            "yang berakhir dengan /exec."
         )
 
 
 def validate_file_name(file_name):
-    """Memvalidasi nama file."""
+    """Memvalidasi nama file sebelum dikirim."""
 
     if not file_name:
         raise ValueError(
@@ -115,8 +130,46 @@ def calculate_sha256(raw_content):
     ).hexdigest()
 
 
+def detect_report_role(path):
+    """
+    Menentukan fungsi file agar penyimpanan tidak
+    tertukar antara laporan dan metadata.
+    """
+
+    file_name = path.name.lower()
+
+    if file_name == "metadata.json":
+        return "metadata"
+
+    if (
+        file_name.startswith("report_")
+        and file_name.endswith("_simple.json")
+    ):
+        return "report_json"
+
+    if (
+        file_name.startswith("report_")
+        and file_name.endswith("_plain.html")
+    ):
+        return "report_html"
+
+    if (
+        file_name.startswith("report_")
+        and file_name.endswith(".csv")
+    ):
+        return "report_csv"
+
+    if (
+        file_name.startswith("report_")
+        and file_name.endswith(".txt")
+    ):
+        return "report_txt"
+
+    return ""
+
+
 def encode_file(path):
-    """Mengubah satu file menjadi Base64."""
+    """Mengubah satu laporan menjadi Base64."""
 
     validate_file_name(
         path.name
@@ -131,6 +184,16 @@ def encode_file(path):
     if not mime_type:
         raise ValueError(
             "Ekstensi tidak diperbolehkan: "
+            + path.name
+        )
+
+    report_role = detect_report_role(
+        path
+    )
+
+    if not report_role:
+        raise ValueError(
+            "File bukan laporan utama: "
             + path.name
         )
 
@@ -162,6 +225,7 @@ def encode_file(path):
 
     return {
         "name": path.name,
+        "role": report_role,
         "mimeType": mime_type,
         "encoding": "base64",
         "size": file_size,
@@ -172,8 +236,10 @@ def encode_file(path):
 
 def collect_files(report_folder):
     """
-    Mengambil laporan TXT, JSON, CSV,
-    dan HTML dari folder hasil.
+    Mengambil hanya laporan utama.
+
+    SHA256SUMS.txt tidak ikut dikirim karena berkas itu
+    merupakan daftar checksum, bukan laporan audit.
     """
 
     selected_files = []
@@ -193,16 +259,40 @@ def collect_files(report_folder):
                 + path.name,
                 file=sys.stderr,
             )
+
+            continue
+
+        file_name = path.name.lower()
+
+        if file_name in EXCLUDED_FILE_NAMES:
+            print(
+                "Melewati file internal: "
+                + path.name
+            )
+
             continue
 
         extension = path.suffix.lower()
 
         if extension not in ALLOWED_MIME_TYPES:
             print(
-                "Melewati file tidak didukung: "
+                "Melewati format tidak didukung: "
                 + path.name,
                 file=sys.stderr,
             )
+
+            continue
+
+        report_role = detect_report_role(
+            path
+        )
+
+        if not report_role:
+            print(
+                "Melewati file non-laporan: "
+                + path.name
+            )
+
             continue
 
         selected_files.append(
@@ -211,8 +301,30 @@ def collect_files(report_folder):
 
     if not selected_files:
         raise RuntimeError(
-            "Tidak ada laporan TXT, JSON, "
-            "CSV, atau HTML."
+            "Tidak ada laporan utama yang ditemukan."
+        )
+
+    roles = {
+        detect_report_role(path)
+        for path in selected_files
+    }
+
+    required_roles = {
+        "report_txt",
+        "report_json",
+        "report_csv",
+    }
+
+    missing_roles = (
+        required_roles - roles
+    )
+
+    if missing_roles:
+        raise RuntimeError(
+            "Format laporan wajib belum tersedia: "
+            + ", ".join(
+                sorted(missing_roles)
+            )
         )
 
     total_size = sum(
@@ -233,7 +345,7 @@ def create_payload(
     callback_secret,
     report_files,
 ):
-    """Membentuk payload untuk Apps Script."""
+    """Membentuk payload untuk endpoint penyimpanan."""
 
     encoded_files = []
 
@@ -263,7 +375,7 @@ def create_payload(
 
 
 def parse_response(response):
-    """Memvalidasi respons Apps Script."""
+    """Memvalidasi respons endpoint penyimpanan."""
 
     try:
         result = response.json()
@@ -271,8 +383,7 @@ def parse_response(response):
         preview = response.text[:500]
 
         raise RuntimeError(
-            "Apps Script tidak "
-            "mengembalikan JSON. "
+            "Endpoint tidak mengembalikan JSON. "
             "Kode HTTP: "
             + str(response.status_code)
             + ". Respons awal: "
@@ -284,15 +395,17 @@ def parse_response(response):
         dict,
     ):
         raise RuntimeError(
-            "Format respons Apps Script "
-            "tidak valid."
+            "Format respons endpoint tidak valid."
         )
 
     return result
 
 
-def send_payload(endpoint, payload):
-    """Mengirim laporan ke Apps Script."""
+def send_payload(
+    endpoint,
+    payload,
+):
+    """Mengirim laporan ke endpoint penyimpanan."""
 
     serialized_payload = json.dumps(
         payload,
@@ -309,7 +422,7 @@ def send_payload(endpoint, payload):
                 ),
                 "Accept": "application/json",
                 "User-Agent": (
-                    "Maigret-GitHub-Actions/1.0"
+                    "Username-Audit-Reporter/2.0"
                 ),
             },
             data=serialized_payload,
@@ -321,14 +434,13 @@ def send_payload(endpoint, payload):
 
     except requests.exceptions.Timeout as error:
         raise RuntimeError(
-            "Permintaan ke Apps Script "
-            "mengalami timeout."
+            "Pengiriman laporan mengalami timeout."
         ) from error
 
     except requests.exceptions.ConnectionError as error:
         raise RuntimeError(
-            "GitHub Actions tidak dapat "
-            "terhubung ke Apps Script."
+            "Tidak dapat terhubung ke "
+            "endpoint penyimpanan."
         ) from error
 
     except requests.exceptions.HTTPError as error:
@@ -345,8 +457,8 @@ def send_payload(endpoint, payload):
             response_preview = ""
 
         raise RuntimeError(
-            "Apps Script mengembalikan "
-            "kesalahan HTTP. Kode: "
+            "Endpoint mengembalikan kesalahan HTTP. "
+            "Kode: "
             + status_code
             + ". Respons: "
             + response_preview
@@ -366,7 +478,7 @@ def send_payload(endpoint, payload):
         error_message = str(
             result.get(
                 "error",
-                "Apps Script menolak unggahan.",
+                "Endpoint menolak unggahan.",
             )
         )
 
@@ -396,7 +508,7 @@ def get_required_environment(name):
 
 
 def print_file_summary(report_files):
-    """Menampilkan ringkasan file."""
+    """Menampilkan ringkasan file yang benar-benar dikirim."""
 
     print(
         "File laporan yang akan dikirim:"
@@ -410,14 +522,16 @@ def print_file_summary(report_files):
 
         print(
             "- "
-            + path.name
+            + detect_report_role(path)
             + ": "
+            + path.name
+            + " ("
             + str(file_size)
-            + " byte"
+            + " byte)"
         )
 
     print(
-        "Total ukuran asli: "
+        "Total ukuran laporan: "
         + str(total_size)
         + " byte"
     )
@@ -454,8 +568,10 @@ def main():
         "APPS_SCRIPT_WEBHOOK_URL"
     )
 
-    callback_secret = get_required_environment(
-        "CALLBACK_SECRET"
+    callback_secret = (
+        get_required_environment(
+            "CALLBACK_SECRET"
+        )
     )
 
     job_id = get_required_environment(
@@ -489,7 +605,7 @@ def main():
     )
 
     print(
-        "Mengirim laporan ke Apps Script..."
+        "Mengirim laporan utama..."
     )
 
     result = send_payload(
@@ -512,7 +628,7 @@ def main():
     }
 
     print(
-        "Apps Script menerima laporan."
+        "Laporan utama berhasil diterima."
     )
 
     print(
