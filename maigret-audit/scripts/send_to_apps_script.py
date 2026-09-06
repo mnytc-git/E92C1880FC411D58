@@ -3,15 +3,12 @@ Mengirim laporan Maigret dari GitHub Actions
 ke Google Apps Script Web App.
 """
 
-from __future__ import annotations
-
 import base64
 import hashlib
 import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
 
 import requests
 
@@ -28,7 +25,7 @@ MAX_TOTAL_SIZE = 10 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 120
 
 
-def validate_job_id(job_id: str) -> None:
+def validate_job_id(job_id):
     """Memvalidasi format job ID."""
 
     allowed_characters = set(
@@ -40,43 +37,48 @@ def validate_job_id(job_id: str) -> None:
             "JOB_ID belum tersedia."
         )
 
-    if not 20 <= len(job_id) <= 50:
+    if len(job_id) not in range(20, 51):
         raise ValueError(
             "Panjang JOB_ID harus antara "
             "20 sampai 50 karakter."
         )
 
-    if any(
-        character.lower() not in allowed_characters
-        for character in job_id
-    ):
-        raise ValueError(
-            "Format JOB_ID tidak valid."
-        )
+    for character in job_id:
+        if (
+            character.lower()
+            not in allowed_characters
+        ):
+            raise ValueError(
+                "Format JOB_ID tidak valid."
+            )
 
 
-def validate_endpoint(endpoint: str) -> None:
+def validate_endpoint(endpoint):
     """Memvalidasi URL Apps Script."""
 
     if not endpoint:
         raise ValueError(
-            "APPS_SCRIPT_WEBHOOK_URL belum tersedia."
+            "APPS_SCRIPT_WEBHOOK_URL "
+            "belum tersedia."
         )
 
-    if not endpoint.startswith("https://"):
+    if not endpoint.startswith(
+        "https://"
+    ):
         raise ValueError(
-            "Endpoint Apps Script harus menggunakan HTTPS."
+            "Endpoint Apps Script harus "
+            "menggunakan HTTPS."
         )
 
     if "/exec" not in endpoint:
         raise ValueError(
-            "Gunakan URL deployment Apps Script "
-            "yang berakhir dengan /exec."
+            "Gunakan URL deployment "
+            "Apps Script yang berakhir /exec."
         )
 
 
-def validate_file_name(file_name: str) -> None:
-    """Mencegah penggunaan nama file yang tidak aman."""
+def validate_file_name(file_name):
+    """Memvalidasi nama file."""
 
     if not file_name:
         raise ValueError(
@@ -88,19 +90,24 @@ def validate_file_name(file_name: str) -> None:
             "Nama file tidak valid."
         )
 
-    if "/" in file_name or "\\" in file_name:
+    if "/" in file_name:
         raise ValueError(
-            "Nama file mengandung pemisah path: "
-            f"{file_name}"
+            "Nama file mengandung pemisah path."
+        )
+
+    if "\\" in file_name:
+        raise ValueError(
+            "Nama file mengandung pemisah path."
         )
 
     if Path(file_name).name != file_name:
         raise ValueError(
-            f"Nama file tidak aman: {file_name}"
+            "Nama file tidak aman: "
+            + file_name
         )
 
 
-def calculate_sha256(raw_content: bytes) -> str:
+def calculate_sha256(raw_content):
     """Menghasilkan checksum SHA-256."""
 
     return hashlib.sha256(
@@ -108,14 +115,15 @@ def calculate_sha256(raw_content: bytes) -> str:
     ).hexdigest()
 
 
-def encode_file(path: Path) -> dict[str, Any]:
-    """Mengubah satu file laporan menjadi Base64."""
+def encode_file(path):
+    """Mengubah satu file menjadi Base64."""
 
     validate_file_name(
         path.name
     )
 
     extension = path.suffix.lower()
+
     mime_type = ALLOWED_MIME_TYPES.get(
         extension
     )
@@ -123,7 +131,7 @@ def encode_file(path: Path) -> dict[str, Any]:
     if not mime_type:
         raise ValueError(
             "Ekstensi tidak diperbolehkan: "
-            f"{path.name}"
+            + path.name
         )
 
     raw_content = path.read_bytes()
@@ -131,7 +139,7 @@ def encode_file(path: Path) -> dict[str, Any]:
     if not raw_content:
         raise ValueError(
             "File kosong tidak dikirim: "
-            f"{path.name}"
+            + path.name
         )
 
     file_size = len(
@@ -141,7 +149,7 @@ def encode_file(path: Path) -> dict[str, Any]:
     if file_size > MAX_FILE_SIZE:
         raise ValueError(
             "File melebihi batas 4 MB: "
-            f"{path.name}, {file_size} byte."
+            + path.name
         )
 
     checksum = calculate_sha256(
@@ -162,26 +170,27 @@ def encode_file(path: Path) -> dict[str, Any]:
     }
 
 
-def collect_files(
-    report_folder: Path,
-) -> list"""
+def collect_files(report_folder):
+    """
     Mengambil laporan TXT, JSON, CSV,
     dan HTML dari folder hasil.
     """
 
-    selected_files: list[Path] = []
+    selected_files = []
 
-    for path in sorted(
+    sorted_files = sorted(
         report_folder.iterdir(),
         key=lambda item: item.name.lower(),
-    ):
+    )
+
+    for path in sorted_files:
         if not path.is_file():
             continue
 
         if path.is_symlink():
             print(
                 "Melewati symbolic link: "
-                f"{path.name}",
+                + path.name,
                 file=sys.stderr,
             )
             continue
@@ -191,7 +200,7 @@ def collect_files(
         if extension not in ALLOWED_MIME_TYPES:
             print(
                 "Melewati file tidak didukung: "
-                f"{path.name}",
+                + path.name,
                 file=sys.stderr,
             )
             continue
@@ -213,24 +222,25 @@ def collect_files(
 
     if total_size > MAX_TOTAL_SIZE:
         raise RuntimeError(
-            "Total laporan melebihi 10 MB. "
-            f"Ukuran aktual: {total_size} byte."
+            "Total laporan melebihi 10 MB."
         )
 
     return selected_files
 
 
 def create_payload(
-    job_id: str,
-    callback_secret: str,
-    report_files: list[Path],
-) -> dict[str, Any]:
+    job_id,
+    callback_secret,
+    report_files,
+):
     """Membentuk payload untuk Apps Script."""
 
-    encoded_files = [
-        encode_file(path)
-        for path in report_files
-    ]
+    encoded_files = []
+
+    for path in report_files:
+        encoded_files.append(
+            encode_file(path)
+        )
 
     return {
         "action": "upload",
@@ -252,35 +262,37 @@ def create_payload(
     }
 
 
-def parse_response(
-    response: requests.Response,
-) -> dict[str, Any]:
-    """Memvalidasi respons JSON dari Apps Script."""
+def parse_response(response):
+    """Memvalidasi respons Apps Script."""
 
     try:
         result = response.json()
-    except requests.exceptions.JSONDecodeError as error:
+    except ValueError as error:
         preview = response.text[:500]
 
         raise RuntimeError(
-            "Apps Script tidak mengembalikan JSON. "
-            f"Kode HTTP: {response.status_code}. "
-            f"Respons awal: {preview}"
+            "Apps Script tidak "
+            "mengembalikan JSON. "
+            "Kode HTTP: "
+            + str(response.status_code)
+            + ". Respons awal: "
+            + preview
         ) from error
 
-    if not isinstance(result, dict):
+    if not isinstance(
+        result,
+        dict,
+    ):
         raise RuntimeError(
-            "Format respons Apps Script tidak valid."
+            "Format respons Apps Script "
+            "tidak valid."
         )
 
     return result
 
 
-def send_payload(
-    endpoint: str,
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    """Mengirim payload laporan ke Apps Script."""
+def send_payload(endpoint, payload):
+    """Mengirim laporan ke Apps Script."""
 
     serialized_payload = json.dumps(
         payload,
@@ -309,33 +321,41 @@ def send_payload(
 
     except requests.exceptions.Timeout as error:
         raise RuntimeError(
-            "Permintaan ke Apps Script mengalami timeout."
+            "Permintaan ke Apps Script "
+            "mengalami timeout."
         ) from error
 
     except requests.exceptions.ConnectionError as error:
         raise RuntimeError(
-            "GitHub Actions tidak dapat terhubung "
-            "ke Apps Script."
+            "GitHub Actions tidak dapat "
+            "terhubung ke Apps Script."
         ) from error
 
     except requests.exceptions.HTTPError as error:
         if error.response is not None:
-            status_code = error.response.status_code
-            response_preview = error.response.text[:500]
+            status_code = str(
+                error.response.status_code
+            )
+
+            response_preview = (
+                error.response.text[:500]
+            )
         else:
             status_code = "tidak diketahui"
             response_preview = ""
 
         raise RuntimeError(
-            "Apps Script mengembalikan kesalahan HTTP. "
-            f"Kode: {status_code}. "
-            f"Respons: {response_preview}"
+            "Apps Script mengembalikan "
+            "kesalahan HTTP. Kode: "
+            + status_code
+            + ". Respons: "
+            + response_preview
         ) from error
 
     except requests.exceptions.RequestException as error:
         raise RuntimeError(
             "Pengiriman laporan gagal: "
-            f"{error}"
+            + str(error)
         ) from error
 
     result = parse_response(
@@ -357,7 +377,7 @@ def send_payload(
     return result
 
 
-def get_required_environment(name: str) -> str:
+def get_required_environment(name):
     """Membaca environment variable wajib."""
 
     value = os.environ.get(
@@ -368,16 +388,15 @@ def get_required_environment(name: str) -> str:
     if not value:
         raise RuntimeError(
             "Environment variable "
-            f"{name} belum tersedia."
+            + name
+            + " belum tersedia."
         )
 
     return value
 
 
-def print_file_summary(
-    report_files: list[Path],
-) -> None:
-    """Menampilkan ringkasan file ke log."""
+def print_file_summary(report_files):
+    """Menampilkan ringkasan file."""
 
     print(
         "File laporan yang akan dikirim:"
@@ -390,21 +409,26 @@ def print_file_summary(
         total_size += file_size
 
         print(
-            f"- {path.name}: {file_size} byte"
+            "- "
+            + path.name
+            + ": "
+            + str(file_size)
+            + " byte"
         )
 
     print(
-        f"Total ukuran asli: {total_size} byte"
+        "Total ukuran asli: "
+        + str(total_size)
+        + " byte"
     )
 
 
-def main() -> None:
-    """Titik masuk utama program."""
+def main():
+    """Titik masuk program."""
 
     if len(sys.argv) != 2:
         raise SystemExit(
-            "Penggunaan:\n"
-            "python "
+            "Penggunaan: python "
             "maigret-audit/scripts/"
             "send_to_apps_script.py "
             "reports/JOB_ID"
@@ -417,13 +441,13 @@ def main() -> None:
     if not report_folder.exists():
         raise FileNotFoundError(
             "Folder tidak ditemukan: "
-            f"{report_folder}"
+            + str(report_folder)
         )
 
     if not report_folder.is_dir():
         raise NotADirectoryError(
             "Path bukan folder: "
-            f"{report_folder}"
+            + str(report_folder)
         )
 
     endpoint = get_required_environment(
@@ -451,7 +475,7 @@ def main() -> None:
     )
 
     print(
-        f"JOB_ID: {job_id}"
+        "JOB_ID: " + job_id
     )
 
     print_file_summary(
@@ -459,9 +483,9 @@ def main() -> None:
     )
 
     payload = create_payload(
-        job_id=job_id,
-        callback_secret=callback_secret,
-        report_files=report_files,
+        job_id,
+        callback_secret,
+        report_files,
     )
 
     print(
@@ -469,8 +493,8 @@ def main() -> None:
     )
 
     result = send_payload(
-        endpoint=endpoint,
-        payload=payload,
+        endpoint,
+        payload,
     )
 
     safe_result = {
