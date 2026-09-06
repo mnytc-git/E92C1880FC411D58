@@ -9,21 +9,35 @@ on:
         type: string
 
       username:
-        description: "Username yang diaudit"
+        description: "Username yang diperiksa"
         required: true
         type: string
 
       scope:
-        description: "Jumlah situs"
+        description: "Cakupan pemeriksaan"
         required: true
         default: "100"
-        type: string
+        type: choice
+        options:
+          - "50"
+          - "100"
+          - "250"
+          - "500"
+          - "1000"
+          - "all"
 
       category:
         description: "Kategori situs"
         required: true
         default: "social"
-        type: string
+        type: choice
+        options:
+          - social
+          - coding
+          - business
+          - gaming
+          - photo
+          - global
 
 permissions:
   contents: read
@@ -34,8 +48,10 @@ concurrency:
 
 jobs:
   audit:
+    name: Jalankan pemeriksaan username
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+
+    timeout-minutes: 90
 
     env:
       JOB_ID: ${{ inputs.job_id }}
@@ -52,11 +68,33 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: >-
+            maigret-audit/requirements.txt
 
       - name: Instal dependensi
+        shell: bash
         run: |
+          set -euo pipefail
+
           python -m pip install --upgrade pip
-          pip install -r maigret-audit/requirements.txt
+
+          python -m pip install \
+            -r maigret-audit/requirements.txt
+
+      - name: Periksa sintaks Python
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python -m py_compile \
+            maigret-audit/scripts/send_to_apps_script.py
+
+      - name: Tampilkan versi Maigret
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          maigret --version || true
 
       - name: Validasi masukan
         shell: bash
@@ -64,7 +102,7 @@ jobs:
           set -euo pipefail
 
           if ! printf '%s' "$JOB_ID" |
-            grep -Eq '^[a-f0-9-]{20,50}$'; then
+            grep -Eq '^[a-fA-F0-9-]{20,50}$'; then
             echo "ID pekerjaan tidak valid."
             exit 1
           fi
@@ -76,7 +114,7 @@ jobs:
           fi
 
           case "$SCOPE_INPUT" in
-            50|100|250|500)
+            50|100|250|500|1000|all)
               ;;
             *)
               echo "Cakupan tidak valid."
@@ -93,35 +131,92 @@ jobs:
               ;;
           esac
 
+      - name: Siapkan folder laporan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "reports/$JOB_ID"
+
+          mkdir -p "reports/$JOB_ID"
+
       - name: Jalankan Maigret
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p "reports/$JOB_ID"
+          COMMAND=(
+            maigret
+            "$USERNAME_INPUT"
+            --timeout 20
+            --max-connections 20
+            --html
+            --json simple
+            --csv
+            --txt
+            --folderoutput "reports/$JOB_ID"
+          )
 
-          if [ "$CATEGORY_INPUT" = "global" ]; then
-            maigret "$USERNAME_INPUT" \
-              --top-sites "$SCOPE_INPUT" \
-              --timeout 15 \
-              --max-connections 10 \
-              --html \
-              --json simple \
-              --csv \
-              --txt \
-              --folderoutput "reports/$JOB_ID"
+          if [ "$SCOPE_INPUT" = "all" ]; then
+            COMMAND+=(
+              --all-sites
+            )
+
+            echo "Mode maksimal: seluruh situs aktif."
           else
-            maigret "$USERNAME_INPUT" \
-              --top-sites "$SCOPE_INPUT" \
-              --tags "$CATEGORY_INPUT" \
-              --timeout 15 \
-              --max-connections 10 \
-              --html \
-              --json simple \
-              --csv \
-              --txt \
-              --folderoutput "reports/$JOB_ID"
+            COMMAND+=(
+              --top-sites "$SCOPE_INPUT"
+            )
+
+            echo "Mode cakupan: top $SCOPE_INPUT situs."
           fi
+
+          if [ "$CATEGORY_INPUT" != "global" ]; then
+            COMMAND+=(
+              --tags "$CATEGORY_INPUT"
+            )
+
+            echo "Filter kategori: $CATEGORY_INPUT."
+          else
+            echo "Kategori global: tanpa filter tag."
+          fi
+
+          printf 'Memulai pemeriksaan username.\n'
+
+          printf 'Cakupan: %s\n' \
+            "$SCOPE_INPUT"
+
+          printf 'Kategori: %s\n' \
+            "$CATEGORY_INPUT"
+
+          "${COMMAND[@]}"
+
+      - name: Periksa laporan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Berkas yang dihasilkan:"
+
+          find "reports/$JOB_ID" \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f | %s byte\n' |
+            sort
+
+          FILE_COUNT="$(
+            find "reports/$JOB_ID" \
+              -maxdepth 1 \
+              -type f |
+              wc -l
+          )"
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "Tidak ada laporan yang dihasilkan."
+            exit 1
+          fi
+
+          echo "Jumlah berkas: $FILE_COUNT"
 
       - name: Buat metadata
         shell: bash
@@ -137,23 +232,52 @@ jobs:
           job_id = os.environ["JOB_ID"]
           folder = Path("reports") / job_id
 
+          generated_files = sorted(
+              path.name
+              for path in folder.iterdir()
+              if path.is_file()
+          )
+
           metadata = {
               "jobId": job_id,
               "username": os.environ["USERNAME_INPUT"],
-              "scope": int(os.environ["SCOPE_INPUT"]),
+              "scope": os.environ["SCOPE_INPUT"],
               "category": os.environ["CATEGORY_INPUT"],
               "status": "completed",
-              "createdAt": datetime.now(timezone.utc).isoformat(),
-              "repository": os.environ.get("GITHUB_REPOSITORY"),
-              "runId": os.environ.get("GITHUB_RUN_ID"),
+              "createdAt": datetime.now(
+                  timezone.utc
+              ).isoformat(),
+              "repository": os.environ.get(
+                  "GITHUB_REPOSITORY",
+                  "",
+              ),
+              "runId": os.environ.get(
+                  "GITHUB_RUN_ID",
+                  "",
+              ),
+              "runAttempt": os.environ.get(
+                  "GITHUB_RUN_ATTEMPT",
+                  "",
+              ),
+              "fileCountBeforeMetadata": len(
+                  generated_files
+              ),
+              "generatedFiles": generated_files,
               "warning": (
-                  "Kecocokan username tidak membuktikan bahwa "
-                  "akun-akun tersebut dimiliki orang yang sama."
+                  "Kesamaan username tidak membuktikan "
+                  "bahwa seluruh akun dimiliki oleh "
+                  "identitas yang sama."
               ),
           }
 
-          (folder / "metadata.json").write_text(
-              json.dumps(metadata, indent=2, ensure_ascii=False),
+          output = folder / "metadata.json"
+
+          output.write_text(
+              json.dumps(
+                  metadata,
+                  indent=2,
+                  ensure_ascii=False,
+              ),
               encoding="utf-8",
           )
           PY
@@ -164,6 +288,7 @@ jobs:
           set -euo pipefail
 
           find "reports/$JOB_ID" \
+            -maxdepth 1 \
             -type f \
             ! -name SHA256SUMS.txt \
             -print0 |
@@ -171,14 +296,18 @@ jobs:
             xargs -0 sha256sum \
             > "reports/$JOB_ID/SHA256SUMS.txt"
 
-      - name: Kirim laporan ke Apps Script
+      - name: Kirim laporan
         env:
           APPS_SCRIPT_WEBHOOK_URL: >-
             ${{ secrets.APPS_SCRIPT_WEBHOOK_URL }}
           CALLBACK_SECRET: >-
             ${{ secrets.CALLBACK_SECRET }}
+        shell: bash
         run: |
-          python maigret-audit/scripts/send_to_apps_script.py \
+          set -euo pipefail
+
+          python \
+            maigret-audit/scripts/send_to_apps_script.py \
             "reports/$JOB_ID"
 
       - name: Simpan artefak cadangan
